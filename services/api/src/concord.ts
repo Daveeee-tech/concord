@@ -1065,12 +1065,7 @@ export class Concord {
     for (const b of breaks) b.firstSeen = priorSeen.get(b.key) ?? asOf;
 
     const s = positions.summary;
-    const coverage: Coverage = {
-      from: asset.historyFrom ?? asset.syncedAt ?? null,
-      to: asset.syncedAt,
-      mode: asset.startMode,
-      complete: !chainBehind && (!start || asOf >= start),
-    };
+    const coverage = this.coverage(asset, asOf);
     const result: RunResult = {
       registerId: Number(reg.id),
       registerSha256: String(reg.sha256),
@@ -1380,6 +1375,21 @@ export class Concord {
     return first?.closed_at;
   }
 
+  /**
+   * The instant range the asset's indexed history can be trusted for, and whether `instant` is
+   * inside it. A baseline asset with no events yet is covered from when it was watched.
+   */
+  private coverage(asset: AssetRecord, instant: string): Coverage {
+    const from = this.historyStart(asset) ?? (asset.startMode === "baseline" ? asset.createdAt : null);
+    const to = asset.syncedAt ?? null;
+    return {
+      from,
+      to,
+      mode: asset.startMode,
+      complete: to !== null && instant <= to && (from === null || instant >= from),
+    };
+  }
+
   /** Freeze the record-date holdings once the indexed chain has passed the record time. */
   private snapshot(asset: AssetRecord, row: Row): HoldingsState | undefined {
     if (row.snapshot) {
@@ -1436,12 +1446,7 @@ export class Concord {
         summary: { holders: 0, expectedTotal: "0", observedTotal: "0", difference: "0", breakCount: 0 },
         lines: [],
         breaks: [],
-        coverage: {
-          from: asset.historyFrom ?? asset.syncedAt ?? null,
-          to: asset.syncedAt,
-          mode: asset.startMode,
-          complete: false,
-        },
+        coverage: this.coverage(asset, recordTime),
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
       return this.action(id);
@@ -1494,12 +1499,7 @@ export class Concord {
     const base = (v: bigint) => formatUnits(v, asset.decimals);
     const flow = (v: bigint) => formatUnits(v, flowAsset.decimals);
     const chainBehind = !asset.syncedAt || asset.syncedAt < recordTime;
-    const coverage: Coverage = {
-      from: asset.historyFrom ?? asset.syncedAt ?? null,
-      to: asset.syncedAt,
-      mode: asset.startMode,
-      complete: !chainBehind && (!start || recordTime >= start),
-    };
+    const coverage = this.coverage(asset, recordTime);
     if (chainBehind) {
       warnings.push(
         `Chain is indexed to ${asset.syncedAt ?? "nothing"}, before the action's record time; later activity is not reflected`,
@@ -1594,7 +1594,7 @@ export class Concord {
    * record keeps its snapshot, its result and its breaks, gains who voided it and why, and stops
    * counting as open from then on.
    */
-  async   async voidAction(id: number, reason: string, actor?: Actor): Promise<Awaited<ReturnType<typeof this.action>>> {
+  async voidAction(id: number, reason: string, actor?: Actor): Promise<Awaited<ReturnType<typeof this.action>>> {
     const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
     if (!row) throw new NotFound(`corporate action ${id} not found`);
     if (typeof reason !== "string" || !reason.trim()) {
