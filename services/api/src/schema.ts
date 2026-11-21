@@ -177,6 +177,13 @@ UPDATE runs SET
     )
   );
 `,
+  // v4: an action entered in error is voided rather than deleted, so it keeps its place in the
+  // audit trail. The columns stay NULL until an action is voided.
+  `
+ALTER TABLE actions ADD COLUMN voided_at TEXT;
+ALTER TABLE actions ADD COLUMN voided_by TEXT;
+ALTER TABLE actions ADD COLUMN void_reason TEXT;
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */
