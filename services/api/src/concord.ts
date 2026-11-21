@@ -142,13 +142,6 @@ interface StoredBreak {
   difference?: string | null;
 }
 
-interface Coverage {
-  from: string | null;
-  to: string | null;
-  mode: "baseline" | "ledger" | "window";
-  complete: boolean;
-}
-
 interface RunResult {
   registerId: number;
   registerSha256: string;
@@ -162,7 +155,6 @@ interface RunResult {
   lines: Array<Record<string, unknown>>;
   movement: Record<string, unknown> | null;
   breaks: StoredBreak[];
-  coverage: Coverage;
 }
 
 interface ActionResult {
@@ -173,7 +165,6 @@ interface ActionResult {
   summary: Record<string, string | number>;
   lines: Array<Record<string, unknown>>;
   breaks: StoredBreak[];
-  coverage: Coverage;
 }
 
 const now = () => new Date().toISOString();
@@ -1065,12 +1056,6 @@ export class Concord {
     for (const b of breaks) b.firstSeen = priorSeen.get(b.key) ?? asOf;
 
     const s = positions.summary;
-    const coverage: Coverage = {
-      from: asset.historyFrom ?? asset.syncedAt ?? null,
-      to: asset.syncedAt,
-      mode: asset.startMode,
-      complete: !chainBehind && (!start || asOf >= start),
-    };
     const result: RunResult = {
       registerId: Number(reg.id),
       registerSha256: String(reg.sha256),
@@ -1104,7 +1089,6 @@ export class Concord {
       })),
       movement,
       breaks,
-      coverage,
     };
     const openBreaks = this.annotate(asset.id, "recon", breaks).filter((b) => b.status === "open").length;
     const id = this.db.insert(
@@ -1407,8 +1391,6 @@ export class Concord {
   async reconcileAction(id: number, options: { sync?: boolean } = {}) {
     const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
     if (!row) throw new NotFound(`corporate action ${id} not found`);
-    // A voided action is history: it is never read from the chain or reconciled again.
-    if (row.voided_at) return this.action(id);
     const params = JSON.parse(String(row.params)) as Record<string, string | string[] | undefined>;
     const type = String(row.type) as ActionType;
     const warnings: string[] = [];
@@ -1436,12 +1418,6 @@ export class Concord {
         summary: { holders: 0, expectedTotal: "0", observedTotal: "0", difference: "0", breakCount: 0 },
         lines: [],
         breaks: [],
-        coverage: {
-          from: asset.historyFrom ?? asset.syncedAt ?? null,
-          to: asset.syncedAt,
-          mode: asset.startMode,
-          complete: false,
-        },
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
       return this.action(id);
@@ -1493,18 +1469,6 @@ export class Concord {
     const recon = reconcileDistribution(snapshot, expected, observed, { ignore });
     const base = (v: bigint) => formatUnits(v, asset.decimals);
     const flow = (v: bigint) => formatUnits(v, flowAsset.decimals);
-    const chainBehind = !asset.syncedAt || asset.syncedAt < recordTime;
-    const coverage: Coverage = {
-      from: asset.historyFrom ?? asset.syncedAt ?? null,
-      to: asset.syncedAt,
-      mode: asset.startMode,
-      complete: !chainBehind && (!start || recordTime >= start),
-    };
-    if (chainBehind) {
-      warnings.push(
-        `Chain is indexed to ${asset.syncedAt ?? "nothing"}, before the action's record time; later activity is not reflected`,
-      );
-    }
     const result: ActionResult = {
       reconciledThrough: flowAsset.syncedAt ?? null,
       warnings,
@@ -1538,7 +1502,6 @@ export class Concord {
         observed: flow(b.observed),
         difference: flow(b.difference),
       })),
-      coverage,
     };
     this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
     return this.action(id);
@@ -1553,7 +1516,6 @@ export class Concord {
       : null;
     const result = row.result ? (JSON.parse(String(row.result)) as ActionResult) : null;
     const breaks = result ? this.annotate(asset.id, `action:${id}`, result.breaks) : [];
-    const voidedAt = row.voided_at ? String(row.voided_at) : null;
     return {
       id: Number(row.id),
       assetId: asset.id,
@@ -1563,7 +1525,7 @@ export class Concord {
       params: JSON.parse(String(row.params)) as Record<string, unknown>,
       createdAt: String(row.created_at),
       reconciledAt: row.reconciled_at ? String(row.reconciled_at) : null,
-      state: voidedAt ? "voided" : snapshot ? (result?.status ?? "pending") : "scheduled",
+      state: snapshot ? (result?.status ?? "pending") : "scheduled",
       snapshot: snapshot && {
         ledger: snapshot.ledger,
         takenAt: snapshot.takenAt,
@@ -1574,11 +1536,7 @@ export class Concord {
         })),
       },
       result: result && { ...result, breaks },
-      // The breaks stay on the record for the audit trail, but a voided action is not open.
-      openBreaks: voidedAt ? 0 : breaks.filter((b) => b.status === "open").length,
-      voidedAt,
-      voidedBy: row.voided_by ? String(row.voided_by) : null,
-      voidReason: row.void_reason ? String(row.void_reason) : null,
+      openBreaks: breaks.filter((b) => b.status === "open").length,
     };
   }
 
@@ -1590,47 +1548,20 @@ export class Concord {
   }
 
   /**
-   * Cancel an action entered in error, keeping it in the audit trail. Nothing is deleted: the
-   * record keeps its snapshot, its result and its breaks, gains who voided it and why, and stops
-   * counting as open from then on.
-   */
-  async   async voidAction(id: number, reason: string, actor?: Actor): Promise<Awaited<ReturnType<typeof this.action>>> {
-    const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
-    if (!row) throw new NotFound(`corporate action ${id} not found`);
-    if (typeof reason !== "string" || !reason.trim()) {
-      throw new Invalid("a reason is required to void a corporate action");
-    }
-    const text = reason.trim();
-    if (text.length > 4000) throw new Invalid("reason is too long");
-    if (row.voided_at) throw new Invalid(`corporate action ${id} is already voided`);
-    this.db.write(
-      "UPDATE actions SET voided_at = ?, voided_by = ?, void_reason = ? WHERE id = ?",
-      now(),
-      actor?.label ?? null,
-      text,
-      id,
-    );
-    return this.action(id);
-  }
-
-
-  /**
    * Reconcile the corporate actions whose record time the indexed chain has now passed, and
    * re-run the ones already reconciled whose execution window is still open and whose flow asset
    * has been read further since. Run after a sync, so a scheduled action advances, and a late
-   * payment lands in the stored result, without anyone pressing a button. A voided action is
-   * never due.
+   * payment lands in the stored result, without anyone pressing a button.
    */
   async reconcileDue(): Promise<number> {
     const due = this.db
       .all<{ id: number }>(
         `SELECT a.id FROM actions a JOIN assets s ON s.id = a.asset_id
-         WHERE a.snapshot IS NULL AND s.synced_at IS NOT NULL AND s.synced_at >= a.record_time
-           AND a.voided_at IS NULL`,
+         WHERE a.snapshot IS NULL AND s.synced_at IS NOT NULL AND s.synced_at >= a.record_time`,
       )
       .map(({ id }) => id);
-    const reconciled = this.db.all<{ id: number; params: string; result: string; voided_at: string | null }>(
-      "SELECT id, params, result, voided_at FROM actions WHERE snapshot IS NOT NULL AND result IS NOT NULL AND voided_at IS NULL",
+    const reconciled = this.db.all<{ id: number; params: string; result: string }>(
+      "SELECT id, params, result FROM actions WHERE snapshot IS NOT NULL AND result IS NOT NULL",
     );
     for (const row of reconciled) {
       const result = JSON.parse(row.result) as ActionResult;
@@ -1796,14 +1727,6 @@ export class Concord {
     };
   }
 
-  /**
-   * Returns the voided-flag for breakdowns that read the live result rather than the summary object.
-   * A voided action still carries its breaks in the trail, but they must not read as open anywhere.
-   */
-  isVoided(row: Row): boolean {
-    return row.voided_at !== null && row.voided_at !== undefined;
-  }
-
   /** Everything an auditor needs for a period, with a digest over the content. */
   auditExport(ref: string, period: { from?: string; to?: string } = {}) {
     const asset = this.asset(ref);
@@ -1837,19 +1760,7 @@ export class Concord {
         return rest;
       })(),
       reconciliations: runs,
-      // A voided action stays in the pack. The pack's shape is a closed contract, so the void
-      // trail travels in the action's free-form params rather than as new top-level fields.
-      corporateActions: this.actions(asset.id)
-        .filter((a) => inPeriod(a.recordTime))
-        .map(({ voidedAt, voidedBy, voidReason, ...a }) =>
-          voidedAt === null
-            ? a
-            : {
-                ...a,
-                state: a.result?.status ?? (a.snapshot ? "pending" : "scheduled"),
-                params: { ...a.params, voided: { at: voidedAt, by: voidedBy, reason: voidReason } },
-              },
-        ),
+      corporateActions: this.actions(asset.id).filter((a) => inPeriod(a.recordTime)),
       controls,
       // The whole trail, not the period: sign-offs happen in wall-clock time, not chain time.
       signoffHistory: this.noteHistory(asset.id),
@@ -1884,9 +1795,7 @@ export class Concord {
           for (const b of run.breaks) rows.push({ source: `reconciliation ${run.id}`, asOf: run.asOf, ...b });
         }
         for (const a of pack.corporateActions) {
-          // A voided action is in the trail, but its breaks are not open.
-          const breaks = a.state === "voided" ? [] : a.result?.breaks ?? [];
-          for (const b of breaks) rows.push({ source: `${a.type} ${a.id}`, asOf: a.recordTime, ...b });
+          for (const b of a.result?.breaks ?? []) rows.push({ source: `${a.type} ${a.id}`, asOf: a.recordTime, ...b });
         }
         for (const b of pack.controls.breaks) rows.push({ source: "controls", asOf: pack.period.to, ...b });
         return toCsv(

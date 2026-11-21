@@ -742,52 +742,6 @@ describe("Concord", () => {
     expect(concord.exportCsv("FUND", "breaks")).toContain("UNINSTRUCTED_CONTROL");
   });
 
-  it("reports coverage on every reconciliation and action result", async () => {
-    concord.importJournal(
-      "FUND",
-      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
-    );
-    const reg = concord.importRegister("FUND", {
-      csv: `holder_id,account,units,status\nA,${h1},90,active\nB,${h2},50,active\n`,
-      asOf: at(5),
-    });
-    const run = await concord.reconcile("FUND", reg.registerId);
-    expect(run.coverage).toMatchObject({
-      from: concord.asset("FUND").historyFrom ?? concord.asset("FUND").syncedAt,
-      to: concord.asset("FUND").syncedAt,
-      mode: "ledger",
-      complete: true,
-    });
-
-    // A register ahead of the chain: complete is false.
-    const aheadReg = concord.importRegister("FUND", {
-      csv: `holder_id,account,units\nA,${h1},90\n`,
-      asOf: at(500),
-    });
-    const aheadRun = await concord.reconcile("FUND", aheadReg.registerId);
-    expect(aheadRun.coverage.complete).toBe(false);
-    expect(aheadRun.warnings).toContainEqual(expect.stringContaining("Chain is indexed to"));
-
-    // An action: coverage present and complete when the chain is current.
-    const split = await concord.createAction("FUND", { type: "split", recordTime: at(35), num: "2", den: "1" });
-    expect(split.result!.coverage).toMatchObject({
-      from: concord.asset("FUND").historyFrom ?? concord.asset("FUND").syncedAt,
-      to: concord.asset("FUND").syncedAt,
-      mode: "ledger",
-      complete: true,
-    });
-
-    // An action with recordTime ahead of the chain: complete is false.
-    chain.latest = 500;
-    chain.push(assetId, "mint", 500, { to: h1, amount: u(1) });
-    await concord.sync("FUND");
-    const futureAction = await concord.createAction("FUND", { type: "split", recordTime: at(600), num: "2", den: "1" });
-    expect(futureAction.result!.coverage.complete).toBe(false);
-    expect(futureAction.result!.warnings).toContainEqual(
-      expect.stringContaining("Chain is indexed to"),
-    );
-  });
-
   it("keeps the audit pack inside the published schema", async () => {
     await concord.sync("FUND");
     concord.importJournal(
@@ -932,10 +886,6 @@ describe("Concord", () => {
         "corporateActions[].result.summary.holders",
         "corporateActions[].result.summary.observedTotal",
         "corporateActions[].result.warnings[]",
-        "corporateActions[].result.coverage.from",
-        "corporateActions[].result.coverage.to",
-        "corporateActions[].result.coverage.mode",
-        "corporateActions[].result.coverage.complete",
         "corporateActions[].snapshot.holderCount",
         "corporateActions[].snapshot.holders[]",
         "corporateActions[].snapshot.holders[].address",
@@ -1031,10 +981,6 @@ describe("Concord", () => {
         "reconciliations[].summary.supplyDifference",
         "reconciliations[].summary.unmappedUnits",
         "reconciliations[].warnings[]",
-        "reconciliations[].coverage.from",
-        "reconciliations[].coverage.to",
-        "reconciliations[].coverage.mode",
-        "reconciliations[].coverage.complete",
         "sha256",
         "signoffHistory[]",
         "signoffHistory[].at",
@@ -1166,87 +1112,6 @@ describe("Concord", () => {
     expect(await concord.reconcileDue()).toBe(1);
     await concord.syncAll();
     expect(await concord.reconcileDue()).toBe(0);
-  });
-
-  it("voids a wrongly entered action and keeps it in the audit trail", async () => {
-    const action = await concord.createAction("FUND", {
-      type: "dividend",
-      recordTime: at(5),
-      ratePerUnit: "10",
-    });
-    // A typo in the rate shows as real breaks until the action is voided.
-    expect(action.state).toBe("breaks");
-    expect(action.openBreaks).toBeGreaterThan(0);
-    expect(action.voidedAt).toBeNull();
-    expect(concord.assetSummary(concord.asset("FUND")).openBreaks.actions).toBe(action.openBreaks);
-
-    // The reason is mandatory, an unknown id is a 404, and a void cannot be re-entered.
-    await expect(concord.voidAction(action.id, "   ")).rejects.toThrow(/reason is required/);
-    await expect(concord.voidAction(999, "typo in the rate")).rejects.toThrow(/not found/);
-    expect(concord.db.get("SELECT voided_at FROM actions WHERE id = ?", action.id)!.voided_at).toBeNull();
-
-    const voided = await concord.voidAction(action.id, "  typo in the rate ", { id: "u1", label: "ops" });
-    expect(voided).toMatchObject({ state: "voided", openBreaks: 0, voidedBy: "ops", voidReason: "typo in the rate" });
-    expect(voided.voidedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(concord.db.get("SELECT voided_by, void_reason FROM actions WHERE id = ?", action.id)).toMatchObject({
-      voided_by: "ops",
-      void_reason: "typo in the rate",
-    });
-    // Its breaks stay on the record, but the action no longer counts as open anywhere.
-    expect(voided.result!.breaks.length).toBeGreaterThan(0);
-    expect(concord.assetSummary(concord.asset("FUND")).openBreaks.actions).toBe(0);
-    await expect(concord.voidAction(action.id, "again")).rejects.toThrow(/already voided/);
-
-    // Never reconciled again, whether asked directly or by the scheduler after a sync.
-    const before = concord.action(action.id);
-    const rerun = await concord.reconcileAction(action.id);
-    expect(rerun).toMatchObject({ state: "voided", reconciledAt: before.reconciledAt, openBreaks: 0 });
-    chain.latest = 400;
-    chain.push(assetId, "transfer", 300, { from: h1, to: h2, amount: u(1) });
-    await concord.syncAll();
-    expect(await concord.reconcileDue()).toBe(0);
-    expect(concord.action(action.id).reconciledAt).toBe(before.reconciledAt);
-
-    // It still appears in the audit pack, with who voided it and why.
-    const pack = concord.auditExport("FUND");
-    expect(pack.corporateActions.find((a) => a.id === action.id)).toMatchObject({
-      id: action.id,
-      openBreaks: 0,
-      params: { voided: { by: "ops", reason: "typo in the rate" } },
-    });
-    expect(validateAuditPack(pack), JSON.stringify(validateAuditPack.errors, null, 2)).toBe(true);
-
-    // A voided action still reaches the breaks export, but contributes no rows.
-    const breaksCsv = concord.exportCsv("FUND", "breaks");
-    expect(breaksCsv).toContain("UNINSTRUCTED_CONTROL");
-    for (const line of breaksCsv.split("\n")) {
-      if (line.includes(`dividend ${action.id}`)) expect(line).toBe("source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor");
-    }
-
-    // The same void can also be requested over HTTP, by the workspace owner.
-    const h = harness();
-    const client = await new h.Client(h.app).signUp("ops@example.test", "Ops");
-    const created = await client.call("/api/assets/FUND/actions", {
-      body: { type: "split", recordTime: at(10), num: "2", den: "1" },
-    });
-    const actionId = (await created.json()).id;
-    expect((await created.json()).state).toBe("scheduled");
-    await expect(
-      client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "entered in error" } }),
-    ).resolves.toMatchObject({ state: "voided", openBreaks: 0, voidedBy: "Test User <ops@example.test>", voidReason: "entered in error" });
-    expect(await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "again" } })).rejects.toMatchObject({ status: 400 });
-    expect(await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "  " } })).rejects.toMatchObject({ status: 400 });
-    await expect(client.call(`/api/actions/99999/void`, { method: "POST", body: { reason: "x" } })).rejects.toMatchObject({ status: 404 });
-    expect((await client.json<{ state: string; openBreaks: number }>(`/api/actions/${actionId}`)).state).toBe("voided");
-    expect((await client.json<{ openBreaks: { actions: number } }>("/api/overview")).assets[0]!.openBreaks.actions).toBe(0);
-
-    // The same action over CSV: still in the trail, but no open rows.
-    const csv = await client.call(`/api/assets/FUND/export?section=breaks&to=${encodeURIComponent(at(50))}`);
-    expect(csv.headers.get("content-type")).toContain("text/csv");
-    const text = await csv.text();
-    expect(text).toContain("UNINSTRUCTED_CONTROL");
-    const matches = text.split("\n").filter((line: string) => line.includes(`split ${actionId}`));
-    expect(matches).toEqual(["source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor"]);
   });
 
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {
