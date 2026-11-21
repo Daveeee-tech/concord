@@ -142,6 +142,13 @@ interface StoredBreak {
   difference?: string | null;
 }
 
+interface Coverage {
+  from: string | null;
+  to: string | null;
+  mode: "baseline" | "ledger" | "window";
+  complete: boolean;
+}
+
 interface RunResult {
   registerId: number;
   registerSha256: string;
@@ -155,6 +162,7 @@ interface RunResult {
   lines: Array<Record<string, unknown>>;
   movement: Record<string, unknown> | null;
   breaks: StoredBreak[];
+  coverage: Coverage;
 }
 
 interface ActionResult {
@@ -165,6 +173,7 @@ interface ActionResult {
   summary: Record<string, string | number>;
   lines: Array<Record<string, unknown>>;
   breaks: StoredBreak[];
+  coverage: Coverage;
 }
 
 const now = () => new Date().toISOString();
@@ -1056,6 +1065,12 @@ export class Concord {
     for (const b of breaks) b.firstSeen = priorSeen.get(b.key) ?? asOf;
 
     const s = positions.summary;
+    const coverage: Coverage = {
+      from: asset.historyFrom ?? asset.syncedAt ?? null,
+      to: asset.syncedAt,
+      mode: asset.startMode,
+      complete: !chainBehind && (!start || asOf >= start),
+    };
     const result: RunResult = {
       registerId: Number(reg.id),
       registerSha256: String(reg.sha256),
@@ -1089,6 +1104,7 @@ export class Concord {
       })),
       movement,
       breaks,
+      coverage,
     };
     const openBreaks = this.annotate(asset.id, "recon", breaks).filter((b) => b.status === "open").length;
     const id = this.db.insert(
@@ -1418,6 +1434,12 @@ export class Concord {
         summary: { holders: 0, expectedTotal: "0", observedTotal: "0", difference: "0", breakCount: 0 },
         lines: [],
         breaks: [],
+        coverage: {
+          from: asset.historyFrom ?? asset.syncedAt ?? null,
+          to: asset.syncedAt,
+          mode: asset.startMode,
+          complete: false,
+        },
       };
       this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
       return this.action(id);
@@ -1469,6 +1491,18 @@ export class Concord {
     const recon = reconcileDistribution(snapshot, expected, observed, { ignore });
     const base = (v: bigint) => formatUnits(v, asset.decimals);
     const flow = (v: bigint) => formatUnits(v, flowAsset.decimals);
+    const chainBehind = !asset.syncedAt || asset.syncedAt < recordTime;
+    const coverage: Coverage = {
+      from: asset.historyFrom ?? asset.syncedAt ?? null,
+      to: asset.syncedAt,
+      mode: asset.startMode,
+      complete: !chainBehind && (!start || recordTime >= start),
+    };
+    if (chainBehind) {
+      warnings.push(
+        `Chain is indexed to ${asset.syncedAt ?? "nothing"}, before the action's record time; later activity is not reflected`,
+      );
+    }
     const result: ActionResult = {
       reconciledThrough: flowAsset.syncedAt ?? null,
       warnings,
@@ -1502,6 +1536,7 @@ export class Concord {
         observed: flow(b.observed),
         difference: flow(b.difference),
       })),
+      coverage,
     };
     this.db.write("UPDATE actions SET result = ?, reconciled_at = ? WHERE id = ?", JSON.stringify(result), now(), id);
     return this.action(id);

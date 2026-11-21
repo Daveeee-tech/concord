@@ -742,6 +742,52 @@ describe("Concord", () => {
     expect(concord.exportCsv("FUND", "breaks")).toContain("UNINSTRUCTED_CONTROL");
   });
 
+  it("reports coverage on every reconciliation and action result", async () => {
+    concord.importJournal(
+      "FUND",
+      `ref,date,type,from_account,to_account,units\nJ1,${at(3)},issue,,${h1},100\nJ2,${at(3)},issue,,${h2},50\n`,
+    );
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units,status\nA,${h1},90,active\nB,${h2},50,active\n`,
+      asOf: at(5),
+    });
+    const run = await concord.reconcile("FUND", reg.registerId);
+    expect(run.coverage).toMatchObject({
+      from: concord.asset("FUND").historyFrom ?? concord.asset("FUND").syncedAt,
+      to: concord.asset("FUND").syncedAt,
+      mode: "ledger",
+      complete: true,
+    });
+
+    // A register ahead of the chain: complete is false.
+    const aheadReg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units\nA,${h1},90\n`,
+      asOf: at(500),
+    });
+    const aheadRun = await concord.reconcile("FUND", aheadReg.registerId);
+    expect(aheadRun.coverage.complete).toBe(false);
+    expect(aheadRun.warnings).toContainEqual(expect.stringContaining("Chain is indexed to"));
+
+    // An action: coverage present and complete when the chain is current.
+    const split = await concord.createAction("FUND", { type: "split", recordTime: at(35), num: "2", den: "1" });
+    expect(split.result!.coverage).toMatchObject({
+      from: concord.asset("FUND").historyFrom ?? concord.asset("FUND").syncedAt,
+      to: concord.asset("FUND").syncedAt,
+      mode: "ledger",
+      complete: true,
+    });
+
+    // An action with recordTime ahead of the chain: complete is false.
+    chain.latest = 500;
+    chain.push(assetId, "mint", 500, { to: h1, amount: u(1) });
+    await concord.sync("FUND");
+    const futureAction = await concord.createAction("FUND", { type: "split", recordTime: at(600), num: "2", den: "1" });
+    expect(futureAction.result!.coverage.complete).toBe(false);
+    expect(futureAction.result!.warnings).toContainEqual(
+      expect.stringContaining("Chain is indexed to"),
+    );
+  });
+
   it("keeps the audit pack inside the published schema", async () => {
     await concord.sync("FUND");
     concord.importJournal(
@@ -886,6 +932,10 @@ describe("Concord", () => {
         "corporateActions[].result.summary.holders",
         "corporateActions[].result.summary.observedTotal",
         "corporateActions[].result.warnings[]",
+        "corporateActions[].result.coverage.from",
+        "corporateActions[].result.coverage.to",
+        "corporateActions[].result.coverage.mode",
+        "corporateActions[].result.coverage.complete",
         "corporateActions[].snapshot.holderCount",
         "corporateActions[].snapshot.holders[]",
         "corporateActions[].snapshot.holders[].address",
@@ -981,6 +1031,10 @@ describe("Concord", () => {
         "reconciliations[].summary.supplyDifference",
         "reconciliations[].summary.unmappedUnits",
         "reconciliations[].warnings[]",
+        "reconciliations[].coverage.from",
+        "reconciliations[].coverage.to",
+        "reconciliations[].coverage.mode",
+        "reconciliations[].coverage.complete",
         "sha256",
         "signoffHistory[]",
         "signoffHistory[].at",
