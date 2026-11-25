@@ -100,6 +100,7 @@ function probes(s: Seeded): Record<string, Probe> {
     "POST /api/assets/:id/actions": p("POST", `/api/assets/${id}/actions`, { type: "split", recordTime: at(1), num: "2", den: "1" }),
     "GET /api/actions/:id": p("GET", `/api/actions/${s.actionId}`),
     "POST /api/actions/:id/reconcile": p("POST", `/api/actions/${s.actionId}/reconcile`),
+    "POST /api/actions/:id/void": p("POST", `/api/actions/${s.actionId}/void`, { reason: "tenancy probe" }),
     "GET /api/assets/:id/controls": p("GET", `/api/assets/${id}/controls`),
     "PUT /api/assets/:id/notes": p("PUT", `/api/assets/${id}/notes`, { scope: "recon", key: "k", fingerprint: "f", status: "resolved", note: "n" }),
     "GET /api/assets/:id/notes/history": p("GET", `/api/assets/${id}/notes/history`),

@@ -1237,34 +1237,50 @@ describe("Concord", () => {
     // A voided action still reaches the breaks export, but contributes no rows.
     const breaksCsv = concord.exportCsv("FUND", "breaks");
     expect(breaksCsv).toContain("UNINSTRUCTED_CONTROL");
-    for (const line of breaksCsv.split("\n")) {
-      if (line.includes(`dividend ${action.id}`)) expect(line).toBe("source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor");
-    }
+    expect(breaksCsv.split("\n").filter((line) => line.includes(`dividend ${action.id}`))).toEqual([]);
 
     // The same void can also be requested over HTTP, by the workspace owner.
     const h = harness();
-    const client = await new h.Client(h.app).signUp("ops@example.test", "Ops");
+    const client = await new Client(h.app).signUp("ops@example.test", "Ops");
+    const watched = await client.json<{ id: string }>("/api/assets", {
+      body: { network: "testnet", asset: `FUND:${issuer}`, fromLedger: 1 },
+    });
+    // The watch already read the chain once, so put the control event past that cursor.
+    h.chain.latest = 120;
+    h.chain.push(watched.id, "set_authorized", 110, { from: h1, authorized: true });
     const created = await client.call("/api/assets/FUND/actions", {
       body: { type: "split", recordTime: at(10), num: "2", den: "1" },
     });
-    const actionId = (await created.json()).id;
-    expect((await created.json()).state).toBe("scheduled");
-    await expect(
-      client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "entered in error" } }),
-    ).resolves.toMatchObject({ state: "voided", openBreaks: 0, voidedBy: "Test User <ops@example.test>", voidReason: "entered in error" });
-    expect(await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "again" } })).rejects.toMatchObject({ status: 400 });
-    expect(await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "  " } })).rejects.toMatchObject({ status: 400 });
-    await expect(client.call(`/api/actions/99999/void`, { method: "POST", body: { reason: "x" } })).rejects.toMatchObject({ status: 404 });
+    const createdBody = (await created.json()) as { id: number; state: string };
+    const actionId = createdBody.id;
+    expect(actionId).toBeGreaterThan(0);
+
+    const voidRes = await client.call(`/api/actions/${actionId}/void`, {
+      method: "POST",
+      body: { reason: "entered in error" },
+    });
+    expect(voidRes.status).toBe(200);
+    expect(await voidRes.json()).toMatchObject({
+      state: "voided",
+      openBreaks: 0,
+      voidedBy: "Test User <ops@example.test>",
+      voidReason: "entered in error",
+    });
+    const again = await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "again" } });
+    expect(again.status).toBe(400);
+    const blank = await client.call(`/api/actions/${actionId}/void`, { method: "POST", body: { reason: "  " } });
+    expect(blank.status).toBe(400);
+    const missing = await client.call("/api/actions/99999/void", { method: "POST", body: { reason: "x" } });
+    expect(missing.status).toBe(404);
     expect((await client.json<{ state: string; openBreaks: number }>(`/api/actions/${actionId}`)).state).toBe("voided");
     expect((await client.json<{ openBreaks: { actions: number } }>("/api/overview")).assets[0]!.openBreaks.actions).toBe(0);
 
     // The same action over CSV: still in the trail, but no open rows.
-    const csv = await client.call(`/api/assets/FUND/export?section=breaks&to=${encodeURIComponent(at(50))}`);
+    const csv = await client.call(`/api/assets/FUND/export?section=breaks&to=${encodeURIComponent(at(120))}`);
     expect(csv.headers.get("content-type")).toContain("text/csv");
     const text = await csv.text();
     expect(text).toContain("UNINSTRUCTED_CONTROL");
-    const matches = text.split("\n").filter((line: string) => line.includes(`split ${actionId}`));
-    expect(matches).toEqual(["source,asOf,scope,type,severity,address,ref,txHash,chainUnits,registerUnits,expected,observed,difference,message,firstSeen,status,note,noteAuthor"]);
+    expect(text.split("\n").filter((line: string) => line.includes(`split ${actionId}`))).toEqual([]);
   });
 
   it("refuses a code shared by two watched assets and a pay asset from another network", async () => {

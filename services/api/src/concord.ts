@@ -1884,8 +1884,9 @@ export class Concord {
           for (const b of run.breaks) rows.push({ source: `reconciliation ${run.id}`, asOf: run.asOf, ...b });
         }
         for (const a of pack.corporateActions) {
-          // A voided action is in the trail, but its breaks are not open.
-          const breaks = a.state === "voided" ? [] : a.result?.breaks ?? [];
+          // A voided action is in the trail, but its breaks are not open. The pack's shape is
+          // closed, so a void travels in params rather than as a state of its own.
+          const breaks = a.params.voided ? [] : a.result?.breaks ?? [];
           for (const b of breaks) rows.push({ source: `${a.type} ${a.id}`, asOf: a.recordTime, ...b });
         }
         for (const b of pack.controls.breaks) rows.push({ source: "controls", asOf: pack.period.to, ...b });

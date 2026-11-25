@@ -324,7 +324,7 @@ export function createApi(tenants: Tenants, auth: Auth, options: ApiOptions): Ho
     if (typeof input.reason !== "string" || !input.reason.trim()) {
       throw new Invalid("a reason is required to void a corporate action");
     }
-    return c.json(ws.voidAction(id, input.reason.trim(), actor), 200);
+    return c.json(await ws.voidAction(id, input.reason.trim(), actor), 200);
   });
 
   priv.get("/assets/:id/controls", (c) => c.json(c.var.ws.controls(id(c))));
