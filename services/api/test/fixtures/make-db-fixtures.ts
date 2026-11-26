@@ -60,8 +60,38 @@ build(join(outDir, "org-v2.db"), ORG_MIGRATIONS.slice(0, 2), (db) => {
            ('usd-mainnet', 'recon', 'SUPPLY_MISMATCH', '10|12', 'resolved', 'corrected', 'bob', 'u2', '2024-01-05T00:00:00Z')`);
 });
 
+// Freeze the v3 schema for future upgrade-compatibility checks.
 build(join(outDir, "org-v3.db"), ORG_MIGRATIONS.slice(0, 3), (db) => {
   db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v3')");
+});
+
+// Freeze the v4 schema for future upgrade-compatibility checks.
+build(join(outDir, "org-v4.db"), ORG_MIGRATIONS.slice(0, 4), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v4')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, instruction_window_hours, movement_window_hours, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', 48, 12, '2024-01-01T00:00:00Z')`);
+});
+
+build(join(outDir, "org-v5.db"), ORG_MIGRATIONS.slice(0, 5), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v5')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, tolerance, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '5', '2024-01-01T00:00:00Z')`);
+});
+
+// v6 adds holdings checkpoints; one row proves the table survives later upgrades.
+build(join(outDir, "org-v6.db"), ORG_MIGRATIONS.slice(0, 6), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v6')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
+  db.exec(`INSERT INTO holdings_checkpoints (asset_id, ledger, closed_at, state, created_at)
+    VALUES ('usd-mainnet', 100, '2024-01-02T00:00:00Z',
+      '{"balances":{"GA":"5000"},"authorized":{"GA":true},"ledger":100,"eventCount":1,"skipped":[]}',
+      '2024-01-02T00:00:00Z')`);
+});
+
+// v7: runs list columns (summary, status, chain_behind, open_breaks), backfilled from stored result bodies, so listing never parses them
+build(join(outDir, "org-v7.db"), ORG_MIGRATIONS.slice(0, 7), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v7')");
   db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
     VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
   db.exec(`INSERT INTO registers (id, asset_id, as_of, source, sha256, issues, imported_by, imported_at)
@@ -100,6 +130,17 @@ build(join(outDir, "org-v3.db"), ORG_MIGRATIONS.slice(0, 3), (db) => {
       ],
     }),
   );
+});
+
+// v8: an action entered in error is voided rather than deleted, so it keeps its place in the audit trail
+build(join(outDir, "org-v8.db"), ORG_MIGRATIONS.slice(0, 8), (db) => {
+  db.exec("INSERT INTO meta (key, value) VALUES ('fixture', 'org-v8')");
+  db.exec(`INSERT INTO assets (id, network, code, issuer, name, decimals, start_mode, state, created_at)
+    VALUES ('usd-mainnet', 'mainnet', 'USD', 'GISSUER1', 'US Dollar', 7, 'baseline', 'ready', '2024-01-01T00:00:00Z')`);
+  // One live action and one voided one, so the new columns survive an upgrade in both states.
+  db.exec(`INSERT INTO actions (id, asset_id, type, label, record_time, params, created_by, created_at, voided_at, voided_by, void_reason)
+    VALUES (1, 'usd-mainnet', 'dividend', 'Dividend 10 per unit', '2024-01-03T00:00:00Z', '{"ratePerUnit":"10","rounding":"floor","exclude":[]}', 'alice', '2024-01-03T00:00:00Z', NULL, NULL, NULL),
+           (2, 'usd-mainnet', 'split', 'Split 2:1', '2024-01-04T00:00:00Z', '{"num":"2","den":"1","exclude":[]}', 'alice', '2024-01-04T00:00:00Z', '2024-01-05T00:00:00Z', 'bob', 'typo in the rate')`);
 });
 
 build(join(outDir, "control-v1.db"), CONTROL_MIGRATIONS.slice(0, 1), (db) => {
